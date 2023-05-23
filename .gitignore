@@ -9,3 +9,6 @@
 Refinery.toml
 target/
 Cargo.lock
+
+# For anyone using an IntelliJ IDE
+.idea/
