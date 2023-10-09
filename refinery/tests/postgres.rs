@@ -31,6 +31,11 @@ mod postgres {
         embed_migrations!("./tests/migrations_missing");
     }
 
+    mod no_transaction {
+        use refinery::embed_migrations;
+        embed_migrations!("./tests/migrations_no_transaction");
+    }
+
     fn get_migrations() -> Vec<Migration> {
         embed_migrations!("./tests/migrations");
 
@@ -759,6 +764,15 @@ mod postgres {
                 .assert()
                 .stdout(contains("applying migration: V2__add_cars_and_motos_table"))
                 .stdout(contains("applying migration: V3__add_brand_to_cars_table"));
+        })
+    }
+
+    #[test]
+    fn run_migration_without_transaction() {
+        run_test(|| {
+            let mut client =
+                Client::connect("postgres://postgres@localhost:5432/postgres", NoTls).unwrap();
+            no_transaction::migrations::runner().run(&mut client).unwrap();
         })
     }
 }

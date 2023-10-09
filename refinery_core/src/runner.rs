@@ -58,32 +58,27 @@ pub enum Target {
 
 // an Enum set that represents the state of the migration: Applied on the database,
 // or Unapplied yet to be applied on the database
+// TODO: Deprecated probably
 #[derive(Clone, Debug)]
 enum State {
     Applied,
     Unapplied,
 }
 
-/// Represents a schema migration to be run on the database,
-/// this struct is used by the [`embed_migrations!`] macro to gather migration files
-/// and shouldn't be needed by the user
-///
-/// [`embed_migrations!`]: macro.embed_migrations.html
-#[derive(Clone, Debug)]
-pub struct Migration {
-    state: State,
+pub struct UnappliedMigration {
     name: String,
     checksum: u64,
     version: i32,
     prefix: Type,
     sql: Option<String>,
-    applied_on: Option<OffsetDateTime>,
+    use_transaction: bool
 }
 
-impl Migration {
+impl UnappliedMigration {
     /// Create an unapplied migration, name and version are parsed from the input_name,
     /// which must be named in the format (U|V){1}__{2}.rs where {1} represents the migration version and {2} the name.
-    pub fn unapplied(input_name: &str, sql: &str) -> Result<Migration, Error> {
+    /// TODO: parse SQL for NO TRANSACTION setting (but only if using global setting)
+    pub fn new(input_name: &str, sql: &str) -> Result<UnappliedMigration, Error> {
         let captures = RE
             .captures(input_name)
             .filter(|caps| caps.len() == 4)
@@ -113,43 +108,25 @@ impl Migration {
         sql.hash(&mut hasher);
         let checksum = hasher.finish();
 
-        Ok(Migration {
-            state: State::Unapplied,
+        Ok(UnappliedMigration {
             name,
             version,
             prefix,
             sql: Some(sql.into()),
-            applied_on: None,
             checksum,
+            use_transaction: true
         })
     }
 
-    // Create a migration from an applied migration on the database
-    pub(crate) fn applied(
-        version: i32,
-        name: String,
-        applied_on: OffsetDateTime,
-        checksum: u64,
-    ) -> Migration {
-        Migration {
-            state: State::Applied,
-            name,
-            checksum,
-            version,
-            // applied migrations are always versioned
-            prefix: Type::Versioned,
-            sql: None,
-            applied_on: Some(applied_on),
-        }
-    }
-
     // convert the Unapplied into an Applied Migration
-    pub(crate) fn set_applied(&mut self) {
-        self.applied_on = Some(OffsetDateTime::now_utc());
-        self.state = State::Applied;
+    pub(crate) fn set_applied(&mut self) -> AppliedMigration {
+        // TODO: Return a new AppliedMigration?
+        AppliedMigration::new(self.version, self.name, OffsetDateTime::now_utc(), self.checksum)
+        // self.applied_on = Some(OffsetDateTime::now_utc());
+        // self.state = State::Applied;
     }
 
-    // Get migration sql content
+        // Get migration sql content
     pub fn sql(&self) -> Option<&str> {
         self.sql.as_deref()
     }
@@ -169,9 +146,64 @@ impl Migration {
         &self.name
     }
 
+    /// Get the Migration checksum. Checksum is formed from the name version and sql of the Migration
+    pub fn checksum(&self) -> u64 {
+        self.checksum
+    }
+}
+
+impl fmt::Display for UnappliedMigration {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(fmt, "{}{}__{}", self.prefix, self.version, self.name)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AppliedMigration {
+    name: String,
+    checksum: u64,
+    version: i32,
+    prefix: Type,
+    applied_on: OffsetDateTime,
+}
+
+impl AppliedMigration {
+    // Create a migration from an applied migration on the database
+    pub(crate) fn new(
+        version: i32,
+        name: String,
+        applied_on: OffsetDateTime,
+        checksum: u64,
+    ) -> AppliedMigration {
+        AppliedMigration {
+            name,
+            checksum,
+            version,
+            // applied migrations are always versioned
+            prefix: Type::Versioned,
+            applied_on: applied_on,
+        }
+    }
+
+    /// Get the Migration version
+    pub fn version(&self) -> u32 {
+        self.version as u32
+    }
+
+    /// Get the Prefix
+    pub fn prefix(&self) -> &Type {
+        &self.prefix
+    }
+
+    /// Get the Migration Name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Get the timestamp from when the Migration was applied. `None` when unapplied.
+    /// TODO: Update comment. This should no longer return `None` to my knowledge
     /// Migrations returned from Runner::get_migrations() will always have `None`.
-    pub fn applied_on(&self) -> Option<&OffsetDateTime> {
+    pub fn applied_on(&self) -> &OffsetDateTime {
         self.applied_on.as_ref()
     }
 
@@ -181,30 +213,31 @@ impl Migration {
     }
 }
 
-impl fmt::Display for Migration {
+impl fmt::Display for AppliedMigration {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(fmt, "{}{}__{}", self.prefix, self.version, self.name)
     }
 }
 
-impl Eq for Migration {}
+impl Eq for AppliedMigration {}
 
-impl PartialEq for Migration {
-    fn eq(&self, other: &Migration) -> bool {
+impl PartialEq for AppliedMigration {
+    // TODO: Do we want comparison with an UnappliedMigration?
+    fn eq(&self, other: &AppliedMigration) -> bool {
         self.version == other.version
             && self.name == other.name
             && self.checksum() == other.checksum()
     }
 }
 
-impl Ord for Migration {
-    fn cmp(&self, other: &Migration) -> Ordering {
+impl Ord for AppliedMigration {
+    fn cmp(&self, other: &AppliedMigration) -> Ordering {
         self.version.cmp(&other.version)
     }
 }
 
-impl PartialOrd for Migration {
-    fn partial_cmp(&self, other: &Migration) -> Option<Ordering> {
+impl PartialOrd for AppliedMigration {
+    fn partial_cmp(&self, other: &AppliedMigration) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -220,17 +253,17 @@ impl PartialOrd for Migration {
 /// [`Error.report`]:  struct.Error.html#method.report
 #[derive(Clone, Debug)]
 pub struct Report {
-    applied_migrations: Vec<Migration>,
+    applied_migrations: Vec<AppliedMigration>,
 }
 
 impl Report {
     /// Instantiate a new Report
-    pub(crate) fn new(applied_migrations: Vec<Migration>) -> Report {
+    pub(crate) fn new(applied_migrations: Vec<AppliedMigration>) -> Report {
         Report { applied_migrations }
     }
 
     /// Retrieves the list of applied `Migration` of the migration cycle
-    pub fn applied_migrations(&self) -> &Vec<Migration> {
+    pub fn applied_migrations(&self) -> &Vec<AppliedMigration> {
         &self.applied_migrations
     }
 }
@@ -244,7 +277,7 @@ pub struct Runner {
     grouped: bool,
     abort_divergent: bool,
     abort_missing: bool,
-    migrations: Vec<Migration>,
+    migrations: Vec<Migration>,  // TODO: Unapplied or Applied?
     target: Target,
     migration_table_name: String,
 }
